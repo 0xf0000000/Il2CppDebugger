@@ -1,541 +1,623 @@
 // fully developed by @trickzqw ლ(^o^ლ)
 
-#ifndef IL2CPP_DEBUGGER_H
-#define IL2CPP_DEBUGGER_H
+#pragma once
 
-#if __cplusplus < 201703L
-#error "Requires C++17"
-#endif
-
-#include <string>
-#include <vector>
-#include <ostream>
-#include <mutex>
-#include <atomic>
-#include <thread>
-#include <queue>
-#include <regex>
-#include <functional>
-#include <cstdint>
-#include <dlfcn.h>
-#include <sstream>
-#include <condition_variable>
-#include <memory>
-
-#ifdef __ANDROID__
 #include <android/log.h>
-#endif
+#include <map>
+#include <jni.h>
+#include <unistd.h>
+#include "xdl.h"
+#include <stdio.h>
+#include <string>
+#include <inttypes.h>
+#include <codecvt>
+#include <locale>
+#include <dlfcn.h>
 
-#ifdef IL2CPP_DEBUG_TEST
-#define MOCK_SYMBOL(resolver, name, type) type name = reinterpret_cast<type>(0xDEADBEEF);
-#else
-#define MOCK_SYMBOL(resolver, name, type)
-#endif
+#ifndef IL2CPPDEBUGGER_H
+#define IL2CPPDEBUGGER_H
 
-namespace il2cpp_debug {
+#define g_LogTag "trickzqww"
 
-struct DebugError {
-    enum Code {
-        Success,
-        InitializationFailed,
-        SymbolNotFound,
-        HookFailed,
-        InvalidArgument,
-        InternalError
-    };
-    Code code;
-    std::string message;
+typedef unsigned short UTF16;
+typedef wchar_t UTF32;
+typedef char UTF8;
+
+namespace {
+	const void *(*il2cpp_assembly_get_image)(const void *assembly);
+	void *(*il2cpp_domain_get)();
+	void **(*il2cpp_domain_get_assemblies)(const void *domain, size_t *size);
+	const char *(*il2cpp_image_get_name)(void *image);
+    void *(*il2cpp_class_from_name)(const void *image, const char *namespaze, const char *name);
+    void *(*il2cpp_class_get_field_from_name)(void *klass, const char *name);
+    void *(*il2cpp_class_get_method_from_name)(void *klass, const char *name, int argsCount);
+    size_t (*il2cpp_field_get_offset)(void *field);
+    void (*il2cpp_field_static_get_value)(void *field, void *value);
+    void (*il2cpp_field_static_set_value)(void *field, void *value);
+    void *(*il2cpp_array_new)(void *elementTypeInfo, size_t length);
+    uint16_t *(*il2cpp_string_chars)(void *str);
+    Il2CppString *(*il2cpp_string_new)(const char *str);
+    Il2CppString *(*il2cpp_string_new_utf16)(const wchar_t *str, int32_t length);
+    char *(*il2cpp_type_get_name)(void *type);
+    void* (*il2cpp_method_get_param)(void *method, uint32_t index);
+    void* (*il2cpp_class_get_methods)(void *klass, void* *iter);
+    const char* (*il2cpp_method_get_name)(void *method);
+    void *(*il2cpp_object_new)(void *klass);
+}
+
+int is_surrogate(UTF16 uc) {
+    return (uc - 0xd800u) < 2048u;
+}
+
+int is_high_surrogate(UTF16 uc) {
+    return (uc & 0xfffffc00) == 0xd800;
+}
+
+int is_low_surrogate(UTF16 uc) {
+    return (uc & 0xfffffc00) == 0xdc00;
+}
+
+UTF32 surrogate_to_utf32(UTF16 high, UTF16 low) {
+    return (high << 10) + low - 0x35fdc00;
+}
+
+const char* utf16_to_utf8(const UTF16* source, size_t len) {
+    std::u16string s(source, source + len);
+    std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> convert;
+    return convert.to_bytes(s).c_str();
+}
+
+const wchar_t* utf16_to_utf32(const UTF16* source, size_t len) {
+	auto output = new UTF32[len + 1];
+
+    for (int i = 0; i < len; i++) {
+        const UTF16 uc = source[i];
+        if (!is_surrogate(uc)) {
+            output[i] = uc;
+        }
+        else {
+            if (is_high_surrogate(uc) && is_low_surrogate(source[i]))
+                output[i] = surrogate_to_utf32(uc, source[i]);
+            else
+                output[i] = L'?';
+        }
+    }
+
+    output[len] = L'\0';
+    return output;
+}
+
+typedef void(*Il2CppMethodPointer)();
+
+struct MethodInfo;
+
+struct VirtualInvokeData
+{
+    Il2CppMethodPointer methodPtr;
+    const MethodInfo* method;
 };
 
-struct DebugResult {
-    bool success;
-    DebugError error;
-    DebugResult() : success(true), error{DebugError::Success, ""} {}
-    DebugResult(DebugError::Code c, const std::string& msg) : success(false), error{c, msg} {}
+struct Il2CppType
+{
+    void* data;
+    unsigned int bits;
 };
 
-struct Il2CppClass {
-    std::string name;
-    std::vector<Il2CppClass*> nestedTypes;
-    std::vector<void*> methods;
+struct Il2CppClass;
+
+struct Il2CppObject
+{
+    Il2CppClass *klass;
+    void *monitor;
 };
 
-struct Il2CppMethodInfo {
-    std::string name;
-    std::string signature;
-    void* methodPointer;
+union Il2CppRGCTXData
+{
+    void* rgctxDataDummy;
+    const MethodInfo* method;
+    const Il2CppType* type;
     Il2CppClass* klass;
 };
 
-using HookCallback = std::function<void(const Il2CppMethodInfo*, const std::vector<std::string>&, std::string&)>;
+struct Il2CppClass_1
+{
+    void* image;
+    void* gc_desc;
+    const char* name;
+    const char* namespaze;
+    Il2CppType* byval_arg;
+    Il2CppType* this_arg;
+    Il2CppClass* element_class;
+    Il2CppClass* castClass;
+    Il2CppClass* declaringType;
+    Il2CppClass* parent;
+    void *generic_class;
+    void* typeDefinition;
+    void* interopData;
+    void* fields;
+    void* events;
+    void* properties;
+    void* methods;
+    Il2CppClass** nestedTypes;
+    Il2CppClass** implementedInterfaces;
+    void* interfaceOffsets;
+};
 
-class SymbolResolver {
-private:
-    void* moduleHandle;
-    std::mutex mutex;
+struct Il2CppClass_2
+{
+    Il2CppClass** typeHierarchy;
+    uint32_t cctor_started;
+    uint32_t cctor_finished;
+    uint64_t cctor_thread;
+    int32_t genericContainerIndex;
+    int32_t customAttributeIndex;
+    uint32_t instance_size;
+    uint32_t actualSize;
+    uint32_t element_size;
+    int32_t native_size;
+    uint32_t static_fields_size;
+    uint32_t thread_static_fields_size;
+    int32_t thread_static_fields_offset;
+    uint32_t flags;
+    uint32_t token;
+    uint16_t method_count;
+    uint16_t property_count;
+    uint16_t field_count;
+    uint16_t event_count;
+    uint16_t nested_type_count;
+    uint16_t vtable_count;
+    uint16_t interfaces_count;
+    uint16_t interface_offsets_count;
+    uint8_t typeHierarchyDepth;
+    uint8_t genericRecursionDepth;
+    uint8_t rank;
+    uint8_t minimumAlignment;
+    uint8_t packingSize;
+    uint8_t bitflags1;
+    uint8_t bitflags2;
+};
 
-    using Il2CppDomainGet = void* (*)();
-    using Il2CppDomainGetAssemblies = void** (*)(void*, size_t*);
-    using Il2CppAssemblyGetImage = void* (*)(void*);
-    using Il2CppImageGetClassCount = uint32_t (*)(void*);
-    using Il2CppImageGetClass = Il2CppClass* (*)(void*, uint32_t);
-    using Il2CppClassGetMethods = void* (*)(Il2CppClass*, uint32_t*);
-    using Il2CppClassGetName = const char* (*)(Il2CppClass*);
-    using Il2CppMethodGetName = const char* (*)(void*);
-    using Il2CppStringChars = const Il2CppChar* (*)(void*);
-    using Il2CppMethodGetParamCount = uint32_t (*)(void*);
-    using Il2CppMethodGetParamName = const char* (*)(void*, uint32_t);
-    using Il2CppMethodGetReturnType = void* (*)(void*);
-    using Il2CppTypeGetName = const char* (*)(void*);
+struct Il2CppClass
+{
+    Il2CppClass_1 _1;
+    void* static_fields;
+    Il2CppRGCTXData* rgctx_data;
+    Il2CppClass_2 _2;
+    VirtualInvokeData vtable[255];
+};
 
-    Il2CppDomainGet il2cpp_domain_get = nullptr;
-    Il2CppDomainGetAssemblies il2cpp_domain_get_assemblies = nullptr;
-    Il2CppAssemblyGetImage il2cpp_assembly_get_image = nullptr;
-    Il2CppImageGetClassCount il2cpp_image_get_class_count = nullptr;
-    Il2CppImageGetClass il2cpp_image_get_class = nullptr;
-    Il2CppClassGetMethods il2cpp_class_get_methods = nullptr;
-    Il2CppClassGetName il2cpp_class_get_name = nullptr;
-    Il2CppMethodGetName il2cpp_method_get_name = nullptr;
-    Il2CppStringChars il2cpp_string_chars = nullptr;
-    Il2CppMethodGetParamCount il2cpp_method_get_param_count = nullptr;
-    Il2CppMethodGetParamName il2cpp_method_get_param_name = nullptr;
-    Il2CppMethodGetReturnType il2cpp_method_get_return_type = nullptr;
-    Il2CppTypeGetName il2cpp_type_get_name = nullptr;
+typedef int32_t il2cpp_array_size_t;
+typedef int32_t il2cpp_array_lower_bound_t;
+struct Il2CppArrayBounds
+{
+    il2cpp_array_size_t length;
+    il2cpp_array_lower_bound_t lower_bound;
+};
 
-#ifdef IL2CPP_DEBUG_TEST
-    std::map<std::string, void*> mockSymbols;
+struct MethodInfo
+{
+    Il2CppMethodPointer methodPointer;
+    void* invoker_method;
+    const char* name;
+    Il2CppClass *declaring_type;
+    const Il2CppType *return_type;
+    const void* parameters;
+    union
+    {
+        const Il2CppRGCTXData* rgctx_data;
+        const void* methodDefinition;
+    };
+    union
+    {
+        const void* genericMethod;
+        const void* genericContainer;
+    };
+    int32_t customAttributeIndex;
+    uint32_t token;
+    uint16_t flags;
+    uint16_t iflags;
+    uint16_t slot;
+    uint8_t parameters_count;
+    uint8_t bitflags;
+};
+
+struct FieldInfo
+{
+public:
+    const char* name;
+    const Il2CppType* type;
+    Il2CppClass *parent;
+    int32_t offset;
+    uint32_t token;
+};
+
+template<typename T> struct Il2CppArray {
+    Il2CppClass *klass;
+    void *monitor;
+    void *bounds;
+    int max_length;
+    T m_Items[65535];
+
+    int getLength() {
+        return max_length;
+    }
+
+    T *getPointer() {
+        return (T *)m_Items;
+    }
+
+    T &operator[](int i) {
+        return m_Items[i];
+    }
+
+    T &operator[](int i) const {
+        return m_Items[i];
+    }
+};
+
+template<typename T>
+using Array = Il2CppArray<T>;
+
+struct Il2CppString {
+    Il2CppClass *klass;
+    void *monitor;
+    int32_t length;
+    uint16_t start_char;
+
+    const char *CString();
+
+    const wchar_t *WCString();
+
+    static Il2CppString *Create(const char *s);
+    static Il2CppString *Create(const wchar_t *s, int len);
+
+    int getLength() {
+        return length;
+    }
+};
+
+const char* Il2CppString::CString() {
+    return utf16_to_utf8(&this->start_char, this->length);
+}
+
+const wchar_t* Il2CppString::WCString() {
+    return utf16_to_utf32(&this->start_char, this->length);
+}
+
+Il2CppString *Il2CppString::Create(const char *s) {
+    return il2cpp_string_new(s);
+}
+
+Il2CppString *Il2CppString::Create(const wchar_t *s, int len) {
+    return il2cpp_string_new_utf16(s, len);
+}
+
+typedef Il2CppString String;
+
+template<typename T> struct Il2CppList {
+    Il2CppClass *klass;
+    void *unk1;
+    Il2CppArray<T> *items;
+    int size;
+    int version;
+
+    T *getItems() {
+        return items->getPointer();
+    }
+
+    int getSize() {
+        return size;
+    }
+
+    int getVersion() {
+        return version;
+    }
+
+    T &operator[](int i) {
+        return items->m_Items[i];
+    }
+
+    T &operator[](int i) const {
+        return items->m_Items[i];
+    }
+};
+
+template<typename T>
+using List = Il2CppList<T>;
+
+template<typename K, typename V> struct Il2CppDictionary {
+    Il2CppClass *klass;
+    void *unk1;
+    Il2CppArray<int **> *table;
+    Il2CppArray<void **> *linkSlots;
+    Il2CppArray<K> *keys;
+    Il2CppArray<V> *values;
+    int touchedSlots;
+    int emptySlot;
+    int size;
+
+    K *getKeys() {
+        return keys->getPointer();
+    }
+
+    V *getValues() {
+        return values->getPointer();
+    }
+
+    int getNumKeys() {
+        return keys->getLength();
+    }
+
+    int getNumValues() {
+        return values->getLength();
+    }
+
+    int getSize() {
+        return size;
+    }
+};
+
+template<typename K, typename V>
+using Dictionary = Il2CppDictionary<K, V>;
+
+void Il2CppAttach(const char *name="libil2cpp.so");
+void *Il2CppGetImageByName(const char *image);
+void *Il2CppGetClassType(const char *image, const char *namespaze, const char *clazz);
+void *Il2CppCreateClassInstance(const char *image, const char *namespaze, const char *clazz);
+void* Il2CppCreateArray(const char *image, const char *namespaze, const char *clazz, size_t length);
+
+void Il2CppGetStaticFieldValue(const char *image, const char *namespaze, const char *clazz, const char *name, void *output);
+void Il2CppSetStaticFieldValue(const char *image, const char *namespaze, const char *clazz, const char *name, void* value);
+
+void *Il2CppGetMethodOffset(const char *image, const char *namespaze, const char *clazz, const char *name, int argsCount = 0);
+void *Il2CppGetMethodOffset(const char *image, const char *namespaze, const char *clazz, const char *name, char** args, int argsCount);
+
+size_t Il2CppGetFieldOffset(const char *image, const char *namespaze, const char *clazz, const char *name);
+size_t Il2CppGetStaticFieldOffset(const char *image, const char *namespaze, const char *clazz, const char *name);
+
+bool Il2CppIsAssembliesLoaded();
+
+void *Il2CppGetImageByName(const char *image) {
+	size_t size;
+	void **assemblies = il2cpp_domain_get_assemblies(il2cpp_domain_get(), &size);
+	for(int i = 0; i < size; ++i) {
+		void *img = (void *)il2cpp_assembly_get_image(assemblies[i]);
+		const char *img_name = il2cpp_image_get_name(img);
+		if (strcmp(img_name, image) == 0) {
+			return img;
+		}
+	}
+	return 0;
+}
+
+void *Il2CppGetClassType(const char *image, const char *namespaze, const char *clazz) {
+	static std::map<std::string, void *> cache;
+	std::string s = image;
+	s += namespaze;
+	s += clazz;
+	if (cache.count(s) > 0)
+		return cache[s];
+	void *img = Il2CppGetImageByName(image);
+	if (!img) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find image %s!", image);
+		return 0;
+	}
+	void *klass = il2cpp_class_from_name(img, namespaze, clazz);
+	if (!klass) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find class %s!", clazz);
+		return 0;
+	}
+	cache[s] = klass;
+	return klass;
+}
+
+void *Il2CppCreateClassInstance(const char *image, const char *namespaze, const char *clazz) {
+	void *img = Il2CppGetImageByName(image);
+	if (!img) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find image %s!", image);
+		return 0;
+	}
+	void *klass = Il2CppGetClassType(image, namespaze, clazz);
+	if (!klass) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find class %s!", clazz);
+		return 0;
+	}
+	void *obj = il2cpp_object_new(klass);
+	if (!obj) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't create object %s!", clazz);
+		return 0;
+	}
+	return obj;
+}
+
+void* Il2CppCreateArray(const char *image, const char *namespaze, const char *clazz, size_t length) {
+	void *img = Il2CppGetImageByName(image);
+	if (!img) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find image %s!", image);
+		return 0;
+	}
+	void *klass = Il2CppGetClassType(image, namespaze, clazz);
+	if (!klass) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find class %s!", clazz);
+		return 0;
+	}
+	return il2cpp_array_new(klass, length);
+}
+
+void Il2CppGetStaticFieldValue(const char *image, const char *namespaze, const char *clazz, const char *name, void *output) {
+	void *img = Il2CppGetImageByName(image);
+	if (!img) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find image %s!", image);
+		return;
+	}
+	void *klass = Il2CppGetClassType(image, namespaze, clazz);
+	if (!klass) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find field %s!",name);
+		return;
+	}
+    void *field = il2cpp_class_get_field_from_name(klass, name);
+	if (!field) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find field %s in class %s!", name, clazz);
+		return;
+	}
+	il2cpp_field_static_get_value(field, output);
+}
+
+void Il2CppSetStaticFieldValue(const char *image, const char *namespaze, const char *clazz, const char *name, void* value) {
+	void *img = Il2CppGetImageByName(image);
+	if (!img) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find image %s!", image);
+		return;
+	}
+	void *klass = Il2CppGetClassType(image, namespaze, clazz);
+	if (!klass) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find field %s!", name);
+		return;
+	}
+	void *field = il2cpp_class_get_field_from_name(klass, name);
+	if (!field) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find field %s in class %s!", name, clazz);
+		return;
+	}
+	il2cpp_field_static_set_value(field, value);
+}
+
+void *Il2CppGetMethodOffset(const char *image, const char *namespaze, const char *clazz, const char *name, int argsCount) {
+	void *img = Il2CppGetImageByName(image);
+	if (!img) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find image %s!", image);
+		return 0;
+	}
+	void *klass = Il2CppGetClassType(image, namespaze, clazz);
+	if (!klass) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find method %s!", name);
+		return 0;
+	}
+	void **method = (void**)il2cpp_class_get_method_from_name(klass, name, argsCount);
+	if (!method) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find method %s in class %s!", name, clazz);
+		return 0;
+	}
+	__android_log_print(ANDROID_LOG_DEBUG, g_LogTag, "%s - [%s] %s::%s: %p", image, namespaze, clazz, name, *method);
+	return *method;
+}
+
+void *Il2CppGetMethodOffset(const char *image, const char *namespaze, const char *clazz, const char *name, char** args, int argsCount) {
+	void *img = Il2CppGetImageByName(image);
+	if (!img) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find image %s!", image);
+		return 0;
+	}
+	void *klass = Il2CppGetClassType(image, namespaze, clazz);
+	if (!klass) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find class %s for method %s!", clazz, name);
+		return 0;
+	}
+	void *iter = 0;
+	int score = 0;
+	void **method = (void**) il2cpp_class_get_methods(klass, &iter);
+	
+	while(method) {
+		const char *fname = il2cpp_method_get_name(method);
+		if (strcmp(fname, name) == 0) {
+			for (int i = 0; i < argsCount; i++) {
+				void *arg = il2cpp_method_get_param(method, i);
+				if (arg) {
+					const char *tname = il2cpp_type_get_name(arg);
+					if (strcmp(tname, args[i]) == 0) {
+						score++;
+					} else {
+						__android_log_print(ANDROID_LOG_INFO, g_LogTag, "Argument at index %d didn't matched requested argument!\n\tRequested: %s\n\tActual: %s\nnSkipping function...", i, args[i], tname);
+						score = 0;
+						goto skip;
+					}
+				}
+			}
+		}
+		skip:
+		if (score == argsCount) {
+			__android_log_print(ANDROID_LOG_DEBUG, g_LogTag, "%s - [%s] %s::%s: %p", image, namespaze, clazz, name, *method);
+			return *method;
+		}
+		method = (void **) il2cpp_class_get_methods(klass, &iter);
+	}
+	__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Cannot find function %s in class %s!", name, clazz);
+	return 0;
+}
+
+size_t Il2CppGetFieldOffset(const char *image, const char *namespaze, const char *clazz, const char *name) {
+	void *img = Il2CppGetImageByName(image);
+	if (!img) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find image %s!", image);
+		return -1;
+	}
+	void *klass = Il2CppGetClassType(image, namespaze, clazz);
+	if (!klass) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find field %s!", name);
+		return -1;
+	}
+	void *field = il2cpp_class_get_field_from_name(klass, name);
+	if (!field) {
+		__android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find field %s in class %s!", clazz, name);
+		return -1;
+	}
+	auto result = il2cpp_field_get_offset(field);
+	__android_log_print(ANDROID_LOG_DEBUG, g_LogTag, "%s - [%s] %s::%s: %p", image, namespaze, clazz, name, (void *) result);
+	return result;
+}
+
+size_t Il2CppGetStaticFieldOffset(const char *image, const char *namespaze, const char *clazz, const char *name){
+    void *img = Il2CppGetImageByName(image);
+    if(!img) {
+        __android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find image %s!", image);
+        return -1;
+    }
+    void *klass = Il2CppGetClassType(image, namespaze, clazz);
+    if(!klass) {
+        __android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find field %s!", name);
+        return -1;
+    }
+
+    FieldInfo *field = (FieldInfo*)il2cpp_class_get_field_from_name(klass, name);
+    if(!field) {
+        __android_log_print(ANDROID_LOG_ERROR, g_LogTag, "Can't find field %s in class %s!", clazz, name);
+        return -1;
+    }
+    return (unsigned long)((uint64_t)field->parent->static_fields + field->offset);
+}
+
+bool Il2CppIsAssembliesLoaded() {
+	size_t size;
+	void **assemblies = il2cpp_domain_get_assemblies(il2cpp_domain_get(), &size);
+	return size != 0 && assemblies != 0;
+}
+
+void Il2CppAttach(const char *name) {
+	void *handle = xdl_open(name, 0);
+	while (!handle) {
+		handle = xdl_open(name, 0);
+		sleep(1);
+	}
+	il2cpp_assembly_get_image = (const void *(*)(const void *)) xdl_sym(handle, "il2cpp_assembly_get_image",0);
+    il2cpp_domain_get = (void *(*)()) xdl_sym(handle, "il2cpp_domain_get",0);
+    il2cpp_domain_get_assemblies = (void **(*)(const void* , size_t*)) xdl_sym(handle, "il2cpp_domain_get_assemblies",0);
+    il2cpp_image_get_name = (const char *(*)(void *)) xdl_sym(handle, "il2cpp_image_get_name",0);
+    il2cpp_class_from_name = (void* (*)(const void*, const char*, const char *)) xdl_sym(handle, "il2cpp_class_from_name",0);
+    il2cpp_class_get_field_from_name = (void* (*)(void*, const char *)) xdl_sym(handle, "il2cpp_class_get_field_from_name",0);
+    il2cpp_class_get_method_from_name = (void* (*)(void *, const char*, int)) xdl_sym(handle, "il2cpp_class_get_method_from_name",0);
+    il2cpp_field_get_offset = (size_t (*)(void *)) xdl_sym(handle, "il2cpp_field_get_offset",0);
+    il2cpp_field_static_get_value = (void (*)(void*, void *)) xdl_sym(handle, "il2cpp_field_static_get_value",0);
+    il2cpp_field_static_set_value = (void (*)(void*, void *)) xdl_sym(handle, "il2cpp_field_static_set_value",0);
+    il2cpp_array_new = (void *(*)(void*, size_t)) xdl_sym(handle, "il2cpp_array_new",0);
+    il2cpp_string_chars = (uint16_t *(*)(void*)) xdl_sym(handle, "il2cpp_string_chars",0);
+    il2cpp_string_new = (Il2CppString *(*)(const char *)) xdl_sym(handle, "il2cpp_string_new",0);
+    il2cpp_string_new_utf16 = (Il2CppString *(*)(const wchar_t *, int32_t)) xdl_sym(handle, "il2cpp_string_new_utf16",0);
+    il2cpp_type_get_name = (char *(*)(void *)) xdl_sym(handle, "il2cpp_type_get_name",0);
+    il2cpp_method_get_param = (void *(*)(void *, uint32_t)) xdl_sym(handle, "il2cpp_method_get_param",0);
+    il2cpp_class_get_methods = (void *(*)(void *, void **)) xdl_sym(handle, "il2cpp_class_get_methods",0);
+    il2cpp_method_get_name = (const char *(*)(void *)) xdl_sym(handle, "il2cpp_method_get_name",0);
+    il2cpp_object_new = (void *(*)(void *)) xdl_sym(handle, "il2cpp_object_new",0);
+    xdl_close(handle);
+}
+
 #endif
-
-    void* ResolveSymbol(const std::string& name) {
-        std::lock_guard<std::mutex> lock(mutex);
-#ifdef IL2CPP_DEBUG_TEST
-        auto it = mockSymbols.find(name);
-        if (it != mockSymbols.end()) return it->second;
-        return nullptr;
-#else
-        if (moduleHandle == nullptr) return nullptr;
-        return dlsym(moduleHandle, name.c_str());
-#endif
-    }
-
-public:
-    SymbolResolver(std::uintptr_t moduleBase) : moduleHandle(reinterpret_cast<void*>(moduleBase)) {}
-
-    DebugResult Initialize() {
-        il2cpp_domain_get = reinterpret_cast<Il2CppDomainGet>(ResolveSymbol("il2cpp_domain_get"));
-        if (!il2cpp_domain_get) return DebugResult(DebugError::SymbolNotFound, "Symbol il2cpp_domain_get not found");
-
-        il2cpp_domain_get_assemblies = reinterpret_cast<Il2CppDomainGetAssemblies>(ResolveSymbol("il2cpp_domain_get_assemblies"));
-        if (!il2cpp_domain_get_assemblies) return DebugResult(DebugError::SymbolNotFound, "Symbol il2cpp_domain_get_assemblies not found");
-
-        il2cpp_assembly_get_image = reinterpret_cast<Il2CppAssemblyGetImage>(ResolveSymbol("il2cpp_assembly_get_image"));
-        if (!il2cpp_assembly_get_image) return DebugResult(DebugError::SymbolNotFound, "Symbol il2cpp_assembly_get_image not found");
-
-        il2cpp_image_get_class_count = reinterpret_cast<Il2CppImageGetClassCount>(ResolveSymbol("il2cpp_image_get_class_count"));
-        if (!il2cpp_image_get_class_count) return DebugResult(DebugError::SymbolNotFound, "Symbol il2cpp_image_get_class_count not found");
-
-        il2cpp_image_get_class = reinterpret_cast<Il2CppImageGetClass>(ResolveSymbol("il2cpp_image_get_class"));
-        if (!il2cpp_image_get_class) return DebugResult(DebugError::SymbolNotFound, "Symbol il2cpp_image_get_class not found");
-
-        il2cpp_class_get_methods = reinterpret_cast<Il2CppClassGetMethods>(ResolveSymbol("il2cpp_class_get_methods"));
-        if (!il2cpp_class_get_methods) return DebugResult(DebugError::SymbolNotFound, "Symbol il2cpp_class_get_methods not found");
-
-        il2cpp_class_get_name = reinterpret_cast<Il2CppClassGetName>(ResolveSymbol("il2cpp_class_get_name"));
-        if (!il2cpp_class_get_name) return DebugResult(DebugError::SymbolNotFound, "Symbol il2cpp_class_get_name not found");
-
-        il2cpp_method_get_name = reinterpret_cast<Il2CppMethodGetName>(ResolveSymbol("il2cpp_method_get_name"));
-        if (!il2cpp_method_get_name) return DebugResult(DebugError::SymbolNotFound, "Symbol il2cpp_method_get_name not found");
-
-        il2cpp_string_chars = reinterpret_cast<Il2CppStringChars>(ResolveSymbol("il2cpp_string_chars"));
-        if (!il2cpp_string_chars) return DebugResult(DebugError::SymbolNotFound, "Symbol il2cpp_string_chars not found");
-
-        il2cpp_method_get_param_count = reinterpret_cast<Il2CppMethodGetParamCount>(ResolveSymbol("il2cpp_method_get_param_count"));
-        if (!il2cpp_method_get_param_count) return DebugResult(DebugError::SymbolNotFound, "Symbol il2cpp_method_get_param_count not found");
-
-        il2cpp_method_get_param_name = reinterpret_cast<Il2CppMethodGetParamName>(ResolveSymbol("il2cpp_method_get_param_name"));
-        if (!il2cpp_method_get_param_name) return DebugResult(DebugError::SymbolNotFound, "Symbol il2cpp_method_get_param_name not found");
-
-        il2cpp_method_get_return_type = reinterpret_cast<Il2CppMethodGetReturnType>(ResolveSymbol("il2cpp_method_get_return_type"));
-        if (!il2cpp_method_get_return_type) return DebugResult(DebugError::SymbolNotFound, "Symbol il2cpp_method_get_return_type not found");
-
-        il2cpp_type_get_name = reinterpret_cast<Il2CppTypeGetName>(ResolveSymbol("il2cpp_type_get_name"));
-        if (!il2cpp_type_get_name) return DebugResult(DebugError::SymbolNotFound, "Symbol il2cpp_type_get_name not found");
-
-        return DebugResult();
-    }
-
-    void* GetDomain() { return il2cpp_domain_get ? il2cpp_domain_get() : nullptr; }
-    void** GetAssemblies(void* domain, size_t* count) { return il2cpp_domain_get_assemblies ? il2cpp_domain_get_assemblies(domain, count) : nullptr; }
-    void* GetImage(void* assembly) { return il2cpp_assembly_get_image ? il2cpp_assembly_get_image(assembly) : nullptr; }
-    uint32_t GetClassCount(void* image) { return il2cpp_image_get_class_count ? il2cpp_image_get_class_count(image) : 0; }
-    Il2CppClass* GetClass(void* image, uint32_t index) { return il2cpp_image_get_class ? il2cpp_image_get_class(image, index) : nullptr; }
-    void* GetMethods(Il2CppClass* klass, uint32_t* iter) { return il2cpp_class_get_methods ? il2cpp_class_get_methods(klass, iter) : nullptr; }
-    const char* GetClassName(Il2CppClass* klass) { return il2cpp_class_get_name ? il2cpp_class_get_name(klass) : ""; }
-    const char* GetMethodName(void* method) { return il2cpp_method_get_name ? il2cpp_method_get_name(method) : ""; }
-    std::string StringToUTF8(void* ilStr) {
-        if (!il2cpp_string_chars || !ilStr) return "nullptr";
-        const Il2CppChar* chars = il2cpp_string_chars(ilStr);
-        if (!chars) return "invalid";
-        std::string utf8;
-        while (*chars) {
-            Il2CppChar c = *chars++;
-            if (c < 128) utf8 += static_cast<char>(c);
-            else if (c < 2048) {
-                utf8 += static_cast<char>(192 | (c >> 6));
-                utf8 += static_cast<char>(128 | (c & 63));
-            } else {
-                utf8 += static_cast<char>(224 | (c >> 12));
-                utf8 += static_cast<char>(128 | ((c >> 6) & 63));
-                utf8 += static_cast<char>(128 | (c & 63));
-            }
-        }
-        return utf8;
-    }
-    uint32_t GetParamCount(void* method) { return il2cpp_method_get_param_count ? il2cpp_method_get_param_count(method) : 0; }
-    const char* GetParamName(void* method, uint32_t index) { return il2cpp_method_get_param_name ? il2cpp_method_get_param_name(method, index) : ""; }
-    void* GetReturnType(void* method) { return il2cpp_method_get_return_type ? il2cpp_method_get_return_type(method) : nullptr; }
-    const char* GetTypeName(void* type) { return il2cpp_type_get_name ? il2cpp_type_get_name(type) : ""; }
-
-#ifdef IL2CPP_DEBUG_TEST
-    void SetMockSymbol(const std::string& name, void* ptr) {
-        std::lock_guard<std::mutex> lock(mutex);
-        mockSymbols[name] = ptr;
-    }
-#endif
-};
-
-class ErrorHandler {
-private:
-    std::vector<std::string> errors;
-    std::mutex mutex;
-
-public:
-    void AddError(const std::string& msg) {
-        std::lock_guard<std::mutex> lock(mutex);
-        errors.push_back(msg);
-    }
-
-    std::vector<std::string> GetErrors() const {
-        std::lock_guard<std::mutex> lock(mutex);
-        return errors;
-    }
-
-    void ClearErrors() {
-        std::lock_guard<std::mutex> lock(mutex);
-        errors.clear();
-    }
-};
-
-class IHookBackend {
-public:
-    virtual ~IHookBackend() = default;
-    virtual DebugResult HookMethod(void* methodPtr, std::function<void(const Il2CppMethodInfo*, const std::vector<std::string>&, std::string&)> callback) = 0;
-    virtual void UnhookMethod(void* methodPtr) = 0;
-    virtual bool IsHooked(void* methodPtr) const = 0;
-};
-
-class NoOpHookBackend : public IHookBackend {
-public:
-    DebugResult HookMethod(void*, std::function<void(const Il2CppMethodInfo*, const std::vector<std::string>&, std::string&)> ) override { return DebugResult(); }
-    void UnhookMethod(void*) override {}
-    bool IsHooked(void*) const override { return false; }
-};
-
-class PlatformStubBackend : public IHookBackend {
-public:
-    DebugResult HookMethod(void* , std::function<void(const Il2CppMethodInfo*, const std::vector<std::string>&, std::string&)> ) override {
-        return DebugResult(DebugError::HookFailed, "Hooking backend not implemented for this platform");
-    }
-    void UnhookMethod(void* ) override {
-    }
-    bool IsHooked(void* ) const override {
-        return false;
-    }
-};
-
-class ClassScanner {
-private:
-    SymbolResolver& resolver;
-    std::vector<Il2CppClass> classes;
-    std::mutex mutex;
-
-    void FillMethodInfo(void* methodPtr, Il2CppMethodInfo& info, Il2CppClass* klass) {
-        info.name = resolver.GetMethodName(methodPtr);
-        info.methodPointer = methodPtr;
-        info.klass = klass;
-        std::stringstream sig;
-        void* retType = resolver.GetReturnType(methodPtr);
-        sig << (retType ? resolver.GetTypeName(retType) : "void") << " " << info.name << "(";
-        uint32_t paramCount = resolver.GetParamCount(methodPtr);
-        for (uint32_t k = 0; k < paramCount; ++k) {
-            if (k > 0) sig << ", ";
-            sig << "param" << k << ": " << resolver.GetParamName(methodPtr, k);
-        }
-        sig << ")";
-        info.signature = sig.str();
-    }
-
-public:
-    ClassScanner(SymbolResolver& res) : resolver(res) {}
-
-    DebugResult ScanAllClasses() {
-        std::lock_guard<std::mutex> lock(mutex);
-        classes.clear();
-
-        void* domain = resolver.GetDomain();
-        if (!domain) return DebugResult(DebugError::InternalError, "Il2Cpp domain not found");
-
-        size_t assemblyCount = 0;
-        void** assemblies = resolver.GetAssemblies(domain, &assemblyCount);
-        if (!assemblies) return DebugResult(DebugError::InternalError, "Assemblies not found");
-
-        for (size_t i = 0; i < assemblyCount; ++i) {
-            void* image = resolver.GetImage(assemblies[i]);
-            if (!image) continue;
-
-            uint32_t classCount = resolver.GetClassCount(image);
-            for (uint32_t j = 0; j < classCount; ++j) {
-                Il2CppClass* rawKlass = resolver.GetClass(image, j);
-                if (!rawKlass) continue;
-
-                Il2CppClass cl;
-                cl.name = resolver.GetClassName(rawKlass);
-
-                uint32_t iter = 0;
-                while (void* method = resolver.GetMethods(rawKlass, &iter)) {
-                    cl.methods.push_back(method);
-                }
-
-                classes.push_back(cl);
-            }
-        }
-
-        return DebugResult();
-    }
-
-    const std::vector<Il2CppClass>& GetClasses() const {
-        return classes;
-    }
-
-    const Il2CppClass* FindClass(const std::string& name) const {
-        std::lock_guard<std::mutex> lock(mutex);
-        for (const auto& cl : classes) {
-            if (cl.name == name) return &cl;
-        }
-        return nullptr;
-    }
-
-    Il2CppMethodInfo FindMethod(const Il2CppClass* klass, const std::string& methodName) const {
-        Il2CppMethodInfo info;
-        if (!klass) return info;
-        for (auto methodPtr : klass->methods) {
-            std::string name = resolver.GetMethodName(methodPtr);
-            if (name == methodName) {
-                const_cast<ClassScanner*>(this)->FillMethodInfo(methodPtr, info, const_cast<Il2CppClass*>(klass));
-                return info;
-            }
-        }
-        return info;
-    }
-};
-
-class MethodMonitor {
-private:
-    std::map<void*, HookCallback> hooks;
-    std::mutex mutex;
-    IHookBackend& backend;
-    SymbolResolver& resolver;
-
-    std::string MarshalValue(void* value, const std::string& typeHint) {
-        if (typeHint.find("int") != std::string::npos) return std::to_string(*reinterpret_cast<int*>(value));
-        if (typeHint.find("float") != std::string::npos) return std::to_string(*reinterpret_cast<float*>(value));
-        if (typeHint.find("Il2CppString*") != std::string::npos) return resolver.StringToUTF8(value);
-        if (typeHint.find("bool") != std::string::npos) return *reinterpret_cast<bool*>(value) ? "true" : "false";
-        if (typeHint.find("char") != std::string::npos) return std::string(1, *reinterpret_cast<char*>(value));
-        std::stringstream ss;
-        ss << "0x" << std::hex << reinterpret_cast<uintptr_t>(value);
-        return ss.str();
-    }
-
-public:
-    MethodMonitor(IHookBackend& bk, SymbolResolver& res) : backend(bk), resolver(res) {}
-
-    DebugResult AddHook(void* methodPtr, HookCallback callback) {
-        std::lock_guard<std::mutex> lock(mutex);
-        if (hooks.count(methodPtr) > 0) return DebugResult(DebugError::InvalidArgument, "Method already hooked");
-        auto wrappedCallback = [callback](const Il2CppMethodInfo* info, const std::vector<std::string>& params, std::string& ret) {
-            callback(info, params, ret);
-        };
-        auto res = backend.HookMethod(methodPtr, wrappedCallback);
-        if (res.success) hooks[methodPtr] = callback;
-        return res;
-    }
-
-    void RemoveHook(void* methodPtr) {
-        std::lock_guard<std::mutex> lock(mutex);
-        auto it = hooks.find(methodPtr);
-        if (it != hooks.end()) {
-            backend.UnhookMethod(methodPtr);
-            hooks.erase(it);
-        }
-    }
-
-    DebugResult HookAllMethods(HookCallback callback, const ClassScanner& scanner) {
-        const auto& classes = scanner.GetClasses();
-        for (const auto& cl : classes) {
-            for (auto methodPtr : cl.methods) {
-                auto res = AddHook(methodPtr, callback);
-                if (!res.success) return res;
-            }
-        }
-        return DebugResult();
-    }
-};
-
-class MethodLogger {
-private:
-    std::queue<std::string> logQueue;
-    std::mutex mutex;
-    std::condition_variable cv;
-    std::thread worker;
-    std::atomic<bool> running{false};
-    std::function<void(const std::string&)> sink;
-    std::regex filter;
-    double rateLimit = 0.0;
-    std::chrono::steady_clock::time_point lastLogTime = std::chrono::steady_clock::now();
-
-    void WorkerThread() {
-        while (running) {
-            std::unique_lock<std::mutex> lock(mutex);
-            cv.wait(lock, [this] { return !logQueue.empty() || !running; });
-            if (!running && logQueue.empty()) break;
-            if (logQueue.empty()) continue;
-            std::string msg = std::move(logQueue.front());
-            logQueue.pop();
-            lock.unlock();
-
-            auto now = std::chrono::steady_clock::now();
-            auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastLogTime).count();
-            if (rateLimit > 0.0 && delta < 1000.0 / rateLimit) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(1000.0 / rateLimit - delta)));
-                now = std::chrono::steady_clock::now();
-            }
-            lastLogTime = now;
-
-            if (std::regex_match(msg, filter)) {
-                sink(msg);
-            }
-        }
-    }
-
-public:
-    MethodLogger() {
-        sink = [](const std::string& msg) {
-#ifdef __ANDROID__
-            __android_log_print(ANDROID_LOG_DEBUG, "Il2CppDebugger", "%s", msg.c_str());
-#else
-            std::cout << msg << std::endl;
-#endif
-        };
-        filter = std::regex(".*");
-    }
-
-    ~MethodLogger() {
-        Stop();
-    }
-
-    void Start() {
-        if (running) return;
-        running = true;
-        worker = std::thread(&MethodLogger::WorkerThread, this);
-    }
-
-    void Stop() {
-        if (!running) return;
-        running = false;
-        cv.notify_all();
-        if (worker.joinable()) worker.join();
-    }
-
-    void Log(const std::string& msg) {
-        if (!running) return;
-        std::lock_guard<std::mutex> lock(mutex);
-        logQueue.push(msg);
-        cv.notify_one();
-    }
-
-    void SetSink(std::function<void(const std::string&)> newSink) { sink = std::move(newSink); }
-    void SetFilter(const std::regex& reg) { filter = reg; }
-    void SetRateLimit(double msgsPerSec) { rateLimit = msgsPerSec; }
-};
-
-class Il2CppDebugger {
-private:
-    SymbolResolver resolver;
-    ErrorHandler errorHandler;
-    ClassScanner scanner;
-    MethodMonitor monitor;
-    MethodLogger logger;
-    std::unique_ptr<IHookBackend> backend;
-    std::atomic<bool> enabled{false};
-
-public:
-    Il2CppDebugger() : resolver(0), scanner(resolver), monitor(*backend, resolver) {
-        backend = std::make_unique<NoOpHookBackend>();
-    }
-
-    DebugResult Initialize(std::uintptr_t il2cppModule) {
-        resolver = SymbolResolver(il2cppModule);
-        auto res = resolver.Initialize();
-        if (!res.success) {
-            errorHandler.AddError(res.error.message);
-            return res;
-        }
-        res = scanner.ScanAllClasses();
-        if (!res.success) {
-            errorHandler.AddError(res.error.message);
-            return res;
-        }
-        logger.Start();
-        return DebugResult();
-    }
-
-    void Enable() { enabled = true; }
-    void Disable() { enabled = false; }
-    bool IsEnabled() const { return enabled; }
-
-    DebugResult MonitorAllMethods(HookCallback globalCallback) {
-        if (!enabled) return DebugResult(DebugError::InvalidArgument, "Debugger not enabled");
-        return monitor.HookAllMethods(globalCallback, scanner);
-    }
-
-    DebugResult HookSpecificMethod(const std::string& className, const std::string& methodName, HookCallback callback) {
-        if (!enabled) return DebugResult(DebugError::InvalidArgument, "Debugger not enabled");
-        const Il2CppClass* klass = scanner.FindClass(className);
-        if (!klass) return DebugResult(DebugError::InvalidArgument, "Class not found");
-        Il2CppMethodInfo method = scanner.FindMethod(klass, methodName);
-        if (!method.methodPointer) return DebugResult(DebugError::InvalidArgument, "Method not found");
-        return monitor.AddHook(method.methodPointer, callback);
-    }
-
-    DebugResult DumpAllClasses(std::ostream& output) const {
-        const auto& classes = scanner.GetClasses();
-        for (const auto& cl : classes) {
-            output << "Class: " << cl.name << std::endl;
-            for (auto methodPtr : cl.methods) {
-                output << "  Method: " << resolver.GetMethodName(methodPtr) << std::endl;
-            }
-        }
-        return DebugResult();
-    }
-
-    std::vector<std::string> GetAllErrors() const { return errorHandler.GetErrors(); }
-    void ClearAllErrors() { errorHandler.ClearErrors(); }
-
-    void SetHookBackend(std::unique_ptr<IHookBackend> newBackend) { backend = std::move(newBackend); }
-    MethodLogger& GetLogger() { return logger; }
-};
-
-} // namespace il2cpp_debug
-
-#endif // IL2CPP_DEBUGGER_H
