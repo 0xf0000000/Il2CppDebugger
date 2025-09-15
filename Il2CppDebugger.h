@@ -16,8 +16,9 @@
 
 #ifndef IL2CPPDEBUGGER_H
 #define IL2CPPDEBUGGER_H
-
 #define g_LogTag "trickzqww"
+
+struct Il2CppString;
 
 typedef unsigned short UTF16;
 typedef wchar_t UTF32;
